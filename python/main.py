@@ -27,7 +27,7 @@ PLOT_STYLE = {
 
 def parse_args():
     p = argparse.ArgumentParser(description="GQBWSSA 特征选择（GPU 随机森林适应度）")
-    p.add_argument("--data", default=os.path.join(ROOT, "data", "qifenlei_ct_quan.csv"))
+    p.add_argument("--data", default=os.path.join(ROOT, "data", "ciciot.csv"))
     p.add_argument("--algos", default="GQBWSSA",
                    help="逗号分隔：GWO,WOA,DBO,HHO,GQBWSSA，或 all")
     p.add_argument("--runs", type=int, default=1, help="重复运行次数 Multi_Num")
