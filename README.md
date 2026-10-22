@@ -14,10 +14,10 @@ Paper: Large-scale IoT attack detection scheme based on LightGBM and feature sel
 
 ```powershell
 # 只跑 GQBWSSA
-D:\Anaconda\envs\cupy-win\python.exe main.py
+python main.py
 
 # 指定算法、重复次数和随机种子
-D:\Anaconda\envs\cupy-win\python.exe main.py --algos GWO,WOA,GQBWSSA --runs 5 --seed 1
+python main.py --algos GWO,WOA,GQBWSSA --runs 5 --seed 46
 
 ```
 
