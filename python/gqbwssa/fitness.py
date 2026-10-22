@@ -1,137 +1,127 @@
-"""适应度函数（对应 Fitness_RF.m）。
-"""
+
+from __future__ import annotations
 
 import time
+import warnings
 
 import numpy as np
 
-
-def _as_numpy(a):
-    return a.get() if hasattr(a, "get") else np.asarray(a)
+from .data import Dataset
 
 
-class FitnessRF:
-    def __init__(self, xtrain, ytrain, xvalid, yvalid, backend="gpu", ntree=20, mtry=2,
-                 alpha=0.99, beta=0.01, n_bins=128, max_depth=16, n_streams=10,
-                 seed=None, cache=True, verbose=False):
-        self.dim = int(xtrain.shape[1])
+class RFFitness:
+    def __init__(self, data: Dataset, rng: np.random.Generator, *, alpha: float = 0.99,
+                 beta: float = 0.01, ntree: int = 20, mtry: int = 2, max_depth: int | None = 16,
+                 n_bins: int = 128, n_streams: int = 10, backend: str = "cuml",
+                 use_cache: bool = True, matlab_ratio: bool = True, n_jobs: int = -1):
+        self.data = data
+        self.rng = rng
         self.alpha = alpha
         self.beta = beta
-        self.backend = backend
         self.ntree = ntree
         self.mtry = mtry
-        self.n_bins = n_bins
         self.max_depth = max_depth
+        self.n_bins = n_bins
         self.n_streams = n_streams
-        self.seed = seed
-        self.cache = cache
-        self.verbose = verbose
-        self.n_calls = 0
-        self.n_trains = 0
-        self.total_time = 0.0
-        self._cache = {}
+        self.backend = backend
+        self.use_cache = use_cache
+        self.n_jobs = n_jobs
+        self.dim = data.dim
        
-        self._rf_rng = np.random.default_rng(seed)
+        self.ratio_den = self.dim + 1 if matlab_ratio else self.dim
 
-        if backend == "gpu":
+        if backend == "cuml":
+            if not data.on_gpu:
+                raise ValueError("cuml 后端需要以 GPU 模式加载数据")
             import cupy as cp
-
-            self._cp = cp
-            self.xtrain = cp.ascontiguousarray(xtrain, dtype=cp.float32)
-            self.xvalid = cp.ascontiguousarray(xvalid, dtype=cp.float32)
-            self.ytrain = cp.ascontiguousarray(ytrain, dtype=cp.int32)
-            self.yvalid = cp.ascontiguousarray(yvalid, dtype=cp.int32)
-            try:
-                from cuml.ensemble import RandomForestClassifier
-
-                self._RF = RandomForestClassifier
-                self.engine = "cuml"
-            except ImportError:
-                from .rf_gpu import CupyRandomForest
-
-                self.engine = "cupy"
-                
-                self.cache = False
-                self.model = CupyRandomForest(ntree=ntree, mtry=mtry, n_bins=n_bins, seed=seed)
-                y_np = _as_numpy(self.ytrain)
-                self.model.prepare(_as_numpy(self.xtrain), y_np, _as_numpy(self.xvalid))
-                raw = _as_numpy(self.yvalid).ravel()
-                codes = np.searchsorted(self.model.classes, raw)
-                known = np.isin(raw, self.model.classes)
-                self._y_code = cp.asarray(np.where(known, codes, -1), dtype=cp.int32)
-                cp.get_default_memory_pool().free_all_blocks()
-        elif backend == "cpu":
-            self.engine = "sklearn"
-            self.xtrain = np.ascontiguousarray(_as_numpy(xtrain), dtype=np.float32)
-            self.xvalid = np.ascontiguousarray(_as_numpy(xvalid), dtype=np.float32)
-            self.ytrain = np.asarray(_as_numpy(ytrain)).ravel()
-            self.yvalid = np.asarray(_as_numpy(yvalid)).ravel()
+            from cuml.ensemble import RandomForestClassifier
+            self._xp = cp
+            self._RF = RandomForestClassifier
+        elif backend == "sklearn":
+            from sklearn.ensemble import RandomForestClassifier
+            self._xp = np
+            self._RF = RandomForestClassifier
+            if data.on_gpu:
+                import cupy as cp
+                self.data = Dataset(cp.asnumpy(data.xtrain), cp.asnumpy(data.xvalid),
+                                    cp.asnumpy(data.ytrain), cp.asnumpy(data.yvalid),
+                                    data.feature_names, False)
         else:
-            raise ValueError(f"未知 backend: {backend}，可选 'gpu' 或 'cpu'")
+            raise ValueError(f"未知后端: {backend}")
+
+        self._cache: dict[bytes, tuple[float, float, float]] = {}
+        self.n_calls = 0
+        self.n_train = 0
+        self.train_time = 0.0
+
+    def reset_stats(self):
+        self.n_calls = 0
+        self.n_train = 0
+        self.train_time = 0.0
 
     def clear_cache(self):
-       
         self._cache.clear()
 
-    def _accuracy(self, feat_idx, state):
-        if self.engine == "cupy":
-            pred = self.model.fit_predict(feat_idx)
-            return float((pred == self._y_code).mean())
+    def _mask(self, x) -> np.ndarray:
+        return np.asarray(x, dtype=float).reshape(-1)[: self.dim] > 0.5
 
-        k = len(feat_idx)
-        if self.engine == "cuml":
-            cp = self._cp
-            cols = cp.asarray(feat_idx)
-            model = self._RF(
-                n_estimators=self.ntree,
-                max_features=min(self.mtry, k),
-                max_depth=self.max_depth,
-                n_bins=self.n_bins,
-                n_streams=self.n_streams,
-                random_state=state,
-            )
-            model.fit(self.xtrain[:, cols], self.ytrain)
-            pred = model.predict(self.xvalid[:, cols])
-            return float((cp.asarray(pred) == self.yvalid).mean())
-
-        from sklearn.ensemble import RandomForestClassifier
-
-        clf = RandomForestClassifier(
-            n_estimators=self.ntree, max_features=min(self.mtry, k),
-            max_depth=self.max_depth, bootstrap=True, n_jobs=-1, random_state=state)
-        clf.fit(self.xtrain[:, feat_idx], self.ytrain)
-        return float(np.mean(clf.predict(self.xvalid[:, feat_idx]) == self.yvalid))
-
-    def evaluate(self, x, use_cache=True):
-        
-        mask = np.asarray(x, dtype=float).ravel() > 0.5
-        n_sel = int(mask.sum())
-        if n_sel == 0:
-            return np.inf, np.inf, np.inf
-
-        
-        state = None if self.engine == "cupy" else int(self._rf_rng.integers(2**31 - 1))
-        key = mask.tobytes()
-        if use_cache and self.cache and key in self._cache:
-            self.n_calls += 1
-            fit, acc, ratio = self._cache[key]
-            if self.verbose:
-                print(f"    [fitness #{self.n_calls}] n_features={n_sel:2d}  ACC={acc:.5f}  cache", flush=True)
-            return fit, acc, ratio
+    def _train_eval(self, mask: np.ndarray) -> float:
+       
+        xp = self._xp
+        cols = xp.asarray(np.flatnonzero(mask))
+        k = int(mask.sum())
+        mtry = min(self.mtry, k)
+        seed = int(self.rng.integers(0, 2**31 - 1))
+        d = self.data
+        xtr = d.xtrain[:, cols]
+        xva = d.xvalid[:, cols]
 
         t0 = time.perf_counter()
-        acc = self._accuracy(np.nonzero(mask)[0], state)
-        dt = time.perf_counter() - t0
-        self.n_calls += 1
-        self.n_trains += 1
-        self.total_time += dt
-        ratio = n_sel / (self.dim + 1)
-        fit = self.alpha * (1 - acc) + self.beta * ratio
-        if self.cache:
-            self._cache[key] = (fit, acc, ratio)
-        if self.verbose:
-            print(f"    [fitness #{self.n_calls}] n_features={n_sel:2d}  ACC={acc:.5f}  {dt:.2f}s", flush=True)
-        return fit, acc, ratio
+        if self.backend == "cuml":
+            model = self._RF(n_estimators=self.ntree, max_features=mtry,
+                             max_depth=self.max_depth if self.max_depth is not None else 32,
+                             n_bins=self.n_bins, n_streams=self.n_streams,
+                             random_state=seed)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model.fit(xtr, d.ytrain)
+                pred = model.predict(xva)
+            acc = float((xp.asarray(pred) == d.yvalid).mean())
+        else:
+            model = self._RF(n_estimators=self.ntree, max_features=mtry,
+                             max_depth=self.max_depth, n_jobs=self.n_jobs,
+                             random_state=seed)
+            model.fit(xtr, d.ytrain)
+            acc = float((model.predict(xva) == d.yvalid).mean())
+        self.train_time += time.perf_counter() - t0
+        self.n_train += 1
+        return acc
 
-    def __call__(self, x):
-        return self.evaluate(x)[0]
+    def full(self, x, use_cache: bool | None = None):
+        
+        self.n_calls += 1
+        mask = self._mask(x)
+        k = int(mask.sum())
+        if k == 0:
+            return (np.inf, np.inf, np.inf)
+
+        use_cache = self.use_cache if use_cache is None else use_cache
+        key = mask.tobytes()
+        if use_cache and key in self._cache:
+            return self._cache[key]
+
+        acc = self._train_eval(mask)
+        ratio = k / self.ratio_den
+        fit = self.alpha * (1 - acc) + self.beta * ratio
+        res = (fit, acc, ratio)
+        if self.use_cache:
+            self._cache[key] = res
+        return res
+
+    def __call__(self, x) -> float:
+       
+        return self.full(x)[0]
+
+    def batch(self, pop) -> np.ndarray:
+       
+        return np.array([self(p) for p in np.atleast_2d(pop)], dtype=float)

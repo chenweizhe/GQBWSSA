@@ -1,49 +1,71 @@
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
 import numpy as np
 
 
-def read_csv(path):
-    
-    try:
-        import cudf
-        import cupy as cp
+@dataclass
+class Dataset:
+    xtrain: object  # cupy.ndarray（GPU）或 numpy.ndarray（CPU）
+    xvalid: object
+    ytrain: object
+    yvalid: object
+    feature_names: list
+    on_gpu: bool
 
-        data = cudf.read_csv(path).astype("float64").to_cupy()
-        return data, cp
-    except ImportError:
-        import pandas as pd
-
-        return pd.read_csv(path).to_numpy(dtype=np.float64), np
+    @property
+    def dim(self) -> int:
+        return int(self.xtrain.shape[1])
 
 
-def _mapminmax(xp, xtrain, xvalid, ymin=0.0, ymax=1.0):
+def _minmax_fit_apply(xp, xtrain, xvalid):
     
     xmin = xtrain.min(axis=0)
     xmax = xtrain.max(axis=0)
-    span = xmax - xmin
-    gain = xp.where(span > 0, (ymax - ymin) / xp.where(span > 0, span, 1.0), 1.0)
-    return (xtrain - xmin) * gain + ymin, (xvalid - xmin) * gain + ymin
+    rng = xmax - xmin
+    rng = xp.where(rng == 0, 1, rng)
+    return (xtrain - xmin) / rng, (xvalid - xmin) / rng
 
 
-def load_dataset(path, rng, train_ratio=0.7):
+def load_dataset(path: str, train_ratio: float = 0.7, use_gpu: bool = True,
+                 rng: np.random.Generator | None = None, max_rows: int | None = None,
+                 label_col: str | None = None) -> Dataset:
     
-    res, xp = read_csv(path)
-    r = rng.permutation(res.shape[0])
-    if xp is not np:
-        r = xp.asarray(r)
-    train_num = int(np.floor(len(r) * train_ratio))
-    train_data = res[r[:train_num]]
-    test_data = res[r[train_num:]]
+    rng = rng or np.random.default_rng()
 
-    xtrain, ytrain = train_data[:, :-1], train_data[:, -1]
-    xvalid, yvalid = test_data[:, :-1], test_data[:, -1]
-    xtrain, xvalid = _mapminmax(xp, xtrain, xvalid, 0.0, 1.0)
+    if use_gpu:
+        import cudf
+        import cupy as xp
+        df = cudf.read_csv(path)
+    else:
+        import pandas as pd
+        xp = np
+        df = pd.read_csv(path)
 
-    dtype = xp.float32
-    xtrain = xp.ascontiguousarray(xtrain, dtype=dtype)
-    xvalid = xp.ascontiguousarray(xvalid, dtype=dtype)
-    ytrain = xp.ascontiguousarray(ytrain, dtype=xp.int32)
-    yvalid = xp.ascontiguousarray(yvalid, dtype=xp.int32)
-    del res, train_data, test_data
-    if xp is not np:
-        xp.get_default_memory_pool().free_all_blocks()
-    return xtrain, xvalid, ytrain, yvalid
+    if max_rows is not None and max_rows < len(df):
+        df = df.iloc[:max_rows]
+
+    label_col = label_col or df.columns[-1]
+    feature_names = [c for c in df.columns if c != label_col]
+
+    x = df[feature_names].astype("float32").values
+    y = df[label_col].astype("int32").values
+    if use_gpu:
+        x, y = xp.asarray(x), xp.asarray(y)
+
+    n = x.shape[0]
+    perm = xp.asarray(rng.permutation(n))
+    train_num = int(np.floor(n * train_ratio))
+    tr, te = perm[:train_num], perm[train_num:]
+
+    xtrain, xvalid = _minmax_fit_apply(xp, x[tr], x[te])
+    return Dataset(
+        xtrain=xp.ascontiguousarray(xtrain, dtype=xp.float32),
+        xvalid=xp.ascontiguousarray(xvalid, dtype=xp.float32),
+        ytrain=xp.ascontiguousarray(y[tr]),
+        yvalid=xp.ascontiguousarray(y[te]),
+        feature_names=feature_names,
+        on_gpu=use_gpu,
+    )

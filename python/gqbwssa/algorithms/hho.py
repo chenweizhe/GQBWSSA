@@ -1,75 +1,71 @@
 
-import time
+from __future__ import annotations
 
 import numpy as np
 
-from ..utils import binarize, initialization, levy
-from .common import MultiRunRecorder
+from ..utils import bounds, initialization, levy, sigmoid_binarize
 
 
-def hho(popsize, iters, lb, ub, dim, fobj, multi_num, fitness_obj, rng):
-    rec = MultiRunRecorder()
+def hho(N, max_iter, lb, ub, dim, fobj, rng: np.random.Generator, log=None):
+    lb = np.broadcast_to(np.asarray(lb, dtype=float), (dim,))
+    ub = np.broadcast_to(np.asarray(ub, dtype=float), (dim,))
 
-    for ii in range(multi_num):
-        fitness_obj.clear_cache()
-        t0 = time.perf_counter()
-        rabbit_location = np.zeros(dim)
-        rabbit_energy = np.inf
+    rabbit_location = np.zeros(dim)
+    rabbit_energy = np.inf
 
-        X = initialization(popsize, ub, lb, dim, rng)
-        curve = np.zeros(iters)
-        fitness00 = np.zeros(popsize)
+    X = initialization(N, ub, lb, dim, rng)
+    curve = np.zeros(max_iter)
+    fitness00 = np.zeros(N)
 
-        for t in range(iters):
-            print(f"  [HHO] run {ii + 1}/{multi_num}  iter {t + 1}/{iters}  best={rabbit_energy:.6f}", flush=True)
-            for i in range(popsize):
-                X[i] = np.clip(X[i], lb, ub)
-                X[i] = binarize(X[i], rng)
-                fitness = fobj(X[i])
-                fitness00[i] = fitness
-                if fitness < rabbit_energy:
-                    rabbit_energy = fitness
-                    rabbit_location = X[i].copy()
+    t = 0
+    while t < max_iter:
+        X = bounds(X, lb, ub)
+        X = np.vstack([sigmoid_binarize(row, rng) for row in X])
+        fitness00 = fobj.batch(X)
+        for i in range(N):
+            if fitness00[i] < rabbit_energy:
+                rabbit_energy = fitness00[i]
+                rabbit_location = X[i].copy()
 
-            E1 = 2 * (1 - t / iters)
-            for i in range(popsize):
-                E0 = 2 * rng.random() - 1
-                esc = E1 * E0
+        E1 = 2 * (1 - t / max_iter)
+        for i in range(N):
+            escaping_energy = E1 * (2 * rng.random() - 1)
 
-                if abs(esc) >= 1:
-                    q = rng.random()
-                    x_rand = X[int(np.floor(popsize * rng.random()))].copy()
-                    if q < 0.5:
-                        X[i] = x_rand - rng.random() * np.abs(x_rand - 2 * rng.random() * X[i])
-                    else:
-                        X[i] = (rabbit_location - X.mean(axis=0)) - rng.random() * ((ub - lb) * rng.random() + lb)
-                    continue
-
+            if abs(escaping_energy) >= 1:
+                
+                q = rng.random()
+                x_rand = X[int(np.floor(N * rng.random()))].copy()
+                if q < 0.5:
+                    X[i] = x_rand - rng.random() * np.abs(x_rand - 2 * rng.random() * X[i])
+                else:
+                    X[i] = (rabbit_location - X.mean(axis=0)) - rng.random() * ((ub - lb) * rng.random() + lb)
+            else:
+               
                 sp = rng.random()
-                if sp >= 0.5 and abs(esc) < 0.5:
-                    X[i] = rabbit_location - esc * np.abs(rabbit_location - X[i])
-
-                if sp >= 0.5 and abs(esc) >= 0.5:
+                e = escaping_energy
+                if sp >= 0.5 and abs(e) < 0.5:
+                    
+                    X[i] = rabbit_location - e * np.abs(rabbit_location - X[i])
+                elif sp >= 0.5 and abs(e) >= 0.5:
+                    
                     jump = 2 * (1 - rng.random())
-                    X[i] = (rabbit_location - X[i]) - esc * np.abs(jump * rabbit_location - X[i])
-
-                if sp < 0.5:
+                    X[i] = (rabbit_location - X[i]) - e * np.abs(jump * rabbit_location - X[i])
+                else:
+                    
                     jump = 2 * (1 - rng.random())
-                    ref = X[i] if abs(esc) >= 0.5 else X.mean(axis=0)
-                    base = rabbit_location - esc * np.abs(jump * rabbit_location - ref)
-                    X1 = binarize(base, rng)
-                    f1 = fobj(X1)
-                    fx = fobj(X[i])
-                    if f1 < fx:
+                    ref = X[i] if abs(e) >= 0.5 else X.mean(axis=0)
+                    base = rabbit_location - e * np.abs(jump * rabbit_location - ref)
+                    X1 = sigmoid_binarize(base, rng)
+                    if fobj(X1) < fobj(X[i]):
                         X[i] = X1
                     else:
-                        X2 = binarize(base + rng.random(dim) * levy(dim, rng), rng)
-                        if fobj(X2) < fx:
+                        X2 = sigmoid_binarize(base + rng.random(dim) * levy(dim, rng), rng)
+                        if fobj(X2) < fobj(X[i]):
                             X[i] = X2
 
-            curve[t] = rabbit_energy
+        t += 1
+        curve[t - 1] = rabbit_energy
+        if log:
+            log(t, rabbit_energy)
 
-        rec.add(fitness_obj, rabbit_location, curve, t0)
-
-    print("HHO finished", flush=True)
-    return rec.result()
+    return rabbit_location, curve, fitness00.copy()

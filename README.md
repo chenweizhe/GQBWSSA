@@ -10,14 +10,14 @@ Paper: Large-scale IoT attack detection scheme based on LightGBM and feature sel
 
 ## 1. 快速开始
 
-在 `GQBWSSA_python` 目录下执行：
+在 `python` 目录下执行：
 
 ```powershell
 # 只跑 GQBWSSA
-python main.py
+python main.py --algos GQBWSSA
 
 # 指定算法、重复次数和随机种子
-python main.py --algos GWO,WOA,GQBWSSA --runs 5 --seed 46
+python main.py --seed 46 --algos GWO WOA GQBWSSA
 
 ```
 

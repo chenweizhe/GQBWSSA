@@ -1,91 +1,86 @@
-
-import time
+from __future__ import annotations
 
 import numpy as np
 
-from ..utils import binarize, bounds
-from .common import MultiRunRecorder
+from ..utils import bounds, sigmoid_binarize
 
 
-def dbo(popsize, max_iteration, lb, ub, dim, fobj, multi_num, fitness_obj, rng):
-    rec = MultiRunRecorder()
+def dbo(N, max_iter, lb, ub, dim, fobj, rng: np.random.Generator, log=None):
+    lb = np.broadcast_to(np.asarray(lb, dtype=float), (dim,))
+    ub = np.broadcast_to(np.asarray(ub, dtype=float), (dim,))
 
-    for ii in range(multi_num):
-        fitness_obj.clear_cache()
-        t0 = time.perf_counter()
-        rol_num = int(round(0.25 * popsize))
-        bab_num = int(round(0.25 * popsize))
-        egg_num = int(round(0.25 * popsize))
+    rol_num = int(round(0.25 * N))  
+    bab_num = int(round(0.25 * N))  
+    egg_num = int(round(0.25 * N))  
 
-        x = np.zeros((popsize, dim))
-        fit = np.zeros(popsize)
-        for i in range(popsize):
-            x[i] = (rng.random(dim) > 0.5).astype(float)
-            fit[i] = fobj(x[i])
-        p_fit = fit.copy()
-        pX = x.copy()
-        XX = pX.copy()
-        best_i = int(np.argmin(fit))
-        f_min = fit[best_i]
-        best_x = x[best_i].copy()
+    x = (rng.random((N, dim)) > 0.5).astype(float)
+    fit = fobj.batch(x)
+    p_fit = fit.copy()
+    p_x = x.copy()
+    xx = p_x.copy()
+    best_i = int(np.argmin(fit))
+    f_min = fit[best_i]
+    best_x = x[best_i].copy()
 
-        ex = np.zeros((popsize, dim))
-        curve = np.zeros(max_iteration)
-        for t in range(1, max_iteration + 1):
-            print(f"  [DBO] run {ii + 1}/{multi_num}  iter {t}/{max_iteration}  best={f_min:.6f}", flush=True)
-            worse = x[int(np.argmax(fit))].copy()
+    ex = np.zeros((N, dim))
+    curve = np.zeros(max_iter)
+    for t in range(1, max_iter + 1):
+        worse = x[int(np.argmax(fit))].copy()
 
-            r2 = rng.random()
-            for i in range(rol_num):
-                if r2 < 0.9:
-                    a = 1 if rng.random() > 0.1 else -1
-                    ex[i] = pX[i] + 0.3 * np.abs(pX[i] - worse) + a * 0.1 * XX[i]
-                else:
-                    aaa = int(rng.integers(1, 181))
-                    theta = aaa * np.pi / 180
-                    ex[i] = pX[i] + np.tan(theta) * np.abs(pX[i] - XX[i])
-                ex[i] = bounds(ex[i], lb, ub)
-                x[i] = binarize(ex[i], rng)
-                fit[i] = fobj(x[i])
+        
+        r2 = rng.random()
+        for i in range(rol_num):
+            if r2 < 0.9:
+                rng.random()  
+                a = 1 if rng.random() > 0.1 else -1
+                ex[i] = p_x[i] + 0.3 * np.abs(p_x[i] - worse) + a * 0.1 * xx[i]
+            else:
+                aaa = int(rng.integers(1, 181))
+                theta = aaa * np.pi / 180
+                ex[i] = p_x[i] + np.tan(theta) * np.abs(p_x[i] - xx[i])
+            ex[i] = bounds(ex[i], lb, ub)
+            x[i] = sigmoid_binarize(ex[i], rng)
+        fit[:rol_num] = fobj.batch(x[:rol_num])
 
-            best_xx = x[int(np.argmin(fit))].copy()
+        best_ii = int(np.argmin(fit))
+        best_xx = x[best_ii].copy()
 
-            R = 1 - t / max_iteration
-            xnew1 = bounds(best_xx * (1 - R), lb, ub)
-            xnew2 = bounds(best_xx * (1 + R), lb, ub)
-            xnew11 = bounds(best_x * (1 - R), lb, ub)
-            xnew22 = bounds(best_x * (1 + R), lb, ub)
+        R = 1 - t / max_iter
+        xnew1 = bounds(best_xx * (1 - R), lb, ub)
+        xnew2 = bounds(best_xx * (1 + R), lb, ub)
+        xnew11 = bounds(best_x * (1 - R), lb, ub)
+        xnew22 = bounds(best_x * (1 + R), lb, ub)
 
-            for i in range(rol_num, rol_num + bab_num):
-                ex[i] = best_xx + rng.random(dim) * (pX[i] - xnew1) + rng.random(dim) * (pX[i] - xnew2)
-                ex[i] = bounds(ex[i], xnew1, xnew2)
-                x[i] = binarize(ex[i], rng)
-                fit[i] = fobj(x[i])
+        s = rol_num
+        
+        for i in range(s, s + bab_num):
+            ex[i] = best_xx + rng.random(dim) * (p_x[i] - xnew1) + rng.random(dim) * (p_x[i] - xnew2)
+            ex[i] = bounds(ex[i], xnew1, xnew2)
+            x[i] = sigmoid_binarize(ex[i], rng)
+       
+        for i in range(s + bab_num, s + bab_num + egg_num):
+            ex[i] = p_x[i] + rng.standard_normal() * (p_x[i] - xnew11) + rng.random(dim) * (p_x[i] - xnew22)
+            ex[i] = bounds(ex[i], xnew1, xnew2)
+            x[i] = sigmoid_binarize(ex[i], rng)
+        
+        for j in range(s + bab_num + egg_num, N):
+            ex[j] = best_x + rng.standard_normal(dim) * (np.abs(p_x[j] - best_xx) + np.abs(p_x[j] - best_x)) / 2
+            ex[j] = bounds(ex[j], xnew1, xnew2)
+            x[j] = sigmoid_binarize(ex[j], rng)
+        fit[s:] = fobj.batch(x[s:])
 
-            for i in range(rol_num + bab_num, rol_num + bab_num + egg_num):
-                ex[i] = pX[i] + rng.standard_normal() * (pX[i] - xnew11) + rng.random(dim) * (pX[i] - xnew22)
-                ex[i] = bounds(ex[i], xnew1, xnew2)
-                x[i] = binarize(ex[i], rng)
-                fit[i] = fobj(x[i])
+        
+        xx = p_x.copy()
+        for i in range(N):
+            if fit[i] < p_fit[i]:
+                p_fit[i] = fit[i]
+                p_x[i] = x[i]
+            if p_fit[i] < f_min:
+                f_min = p_fit[i]
+                best_x = p_x[i].copy()
 
-            for j in range(rol_num + bab_num + egg_num, popsize):
-                ex[j] = best_x + rng.standard_normal(dim) * (np.abs(pX[j] - best_xx) + np.abs(pX[j] - best_x)) / 2
-                ex[j] = bounds(ex[j], xnew1, xnew2)
-                x[j] = binarize(ex[j], rng)
-                fit[j] = fobj(x[j])
+        curve[t - 1] = f_min
+        if log:
+            log(t, f_min)
 
-            XX = pX.copy()
-            for i in range(popsize):
-                if fit[i] < p_fit[i]:
-                    p_fit[i] = fit[i]
-                    pX[i] = x[i]
-                if p_fit[i] < f_min:
-                    f_min = p_fit[i]
-                    best_x = pX[i].copy()
-
-            curve[t - 1] = f_min
-
-        rec.add(fitness_obj, best_x, curve, t0)
-
-    print("DBO finished", flush=True)
-    return rec.result()
+    return best_x, curve, fit.copy()

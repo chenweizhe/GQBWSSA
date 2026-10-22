@@ -11,3 +11,12 @@ ALGORITHMS = {
     "HHO": hho,
     "GQBWSSA": gqbwssa,
 }
+
+
+DISPLAY_NAMES = {
+    "GWO": "GWO-RF",
+    "WOA": "WOA-RF",
+    "DBO": "DBO-RF",
+    "HHO": "HHO-RF",
+    "GQBWSSA": "GQBWSSA-RF",
+}

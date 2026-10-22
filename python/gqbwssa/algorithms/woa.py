@@ -1,65 +1,55 @@
 
-import time
+from __future__ import annotations
 
 import numpy as np
 
-from ..utils import binarize
-from .common import MultiRunRecorder
+from ..utils import bounds, sigmoid_binarize
 
 
-def woa(popsize, maxgen, lb, ub, dim, fobj, multi_num, fitness_obj, rng):
-    lb = lb * np.ones(dim)
-    ub = ub * np.ones(dim)
-    rec = MultiRunRecorder()
+def woa(N, max_iter, lb, ub, dim, fobj, rng: np.random.Generator, log=None):
+    lb = np.broadcast_to(np.asarray(lb, dtype=float), (dim,))
+    ub = np.broadcast_to(np.asarray(ub, dtype=float), (dim,))
 
-    for ii in range(multi_num):
-        fitness_obj.clear_cache()
-        t0 = time.perf_counter()
+    positions = (rng.random((N, dim)) > 0.5).astype(float)
+    fitness = fobj.batch(positions)
+    idx = np.argsort(fitness, kind="stable")
+    leader_pos, leader_score = positions[idx[0]].copy(), fitness[idx[0]]
 
-        fitness = np.zeros(popsize)
-        positions = np.zeros((popsize, dim))
-        for i in range(popsize):
-            positions[i] = (rng.random(dim) > 0.5).astype(float)
-            fitness[i] = fobj(positions[i])
-        order = np.argsort(fitness, kind="stable")
-        leader_pos = positions[order[0]].copy()
-        leader_score = fitness[order[0]]
+    curve = np.zeros(max_iter)
+    epositions = np.zeros((N, dim))
+    for t in range(1, max_iter + 1):
+        a = 2 - t * (2 / max_iter)
+        a2 = -1 + t * (-1 / max_iter)
 
-        curve = np.zeros(maxgen)
-        epositions = np.zeros((popsize, dim))
-        for t in range(1, maxgen + 1):
-            print(f"  [WOA] run {ii + 1}/{multi_num}  iter {t}/{maxgen}  best={leader_score:.6f}", flush=True)
-            a = 2 - t * (2 / maxgen)
-            a2 = -1 + t * (-1 / maxgen)
+        for i in range(N):
+            r1, r2 = rng.random(), rng.random()
+            A = 2 * a * r1 - a
+            C = 2 * r2
+            b = 1
+            l = (a2 - 1) * rng.random() + 1
 
-            for i in range(popsize):
-                r1, r2 = rng.random(), rng.random()
-                A = 2 * a * r1 - a
-                C = 2 * r2
-                b = 1
-                l = (a2 - 1) * rng.random() + 1
+            p = rng.random(dim)
+            if abs(A) >= 1:
+                
+                rand_idx = rng.integers(0, N, size=dim)
+                x_rand = positions[rand_idx, np.arange(dim)]
+                shrink = x_rand - A * np.abs(C * x_rand - positions[i])
+            else:
+               
+                shrink = leader_pos - A * np.abs(C * leader_pos - positions[i])
+           
+            spiral = np.abs(leader_pos - positions[i]) * np.exp(b * l) * np.cos(l * 2 * np.pi) + leader_pos
+            epositions[i] = np.where(p < 0.5, shrink, spiral)
 
-                p = rng.random(dim)
-                if abs(A) >= 1:
-                    idx = rng.integers(0, popsize, size=dim)
-                    x_rand = positions[idx, np.arange(dim)]
-                    shrink = x_rand - A * np.abs(C * x_rand - positions[i])
-                else:
-                    shrink = leader_pos - A * np.abs(C * leader_pos - positions[i])
-                spiral = np.abs(leader_pos - positions[i]) * np.exp(b * l) * np.cos(l * 2 * np.pi) + leader_pos
-                epositions[i] = np.where(p < 0.5, shrink, spiral)
+        epositions = bounds(epositions, lb, ub)
+        positions = np.vstack([sigmoid_binarize(e, rng) for e in epositions])
+        fitness = fobj.batch(positions)
+        for i in range(N):
+            if fitness[i] < leader_score:
+                leader_score, leader_pos = fitness[i], positions[i].copy()
 
-            for i in range(popsize):
-                epositions[i] = np.clip(epositions[i], lb, ub)
-                positions[i] = binarize(epositions[i], rng)
-                fitness[i] = fobj(positions[i])
-                if fitness[i] < leader_score:
-                    leader_score = fitness[i]
-                    leader_pos = positions[i].copy()
+        curve[t - 1] = leader_score
+        if log:
+            log(t, leader_score)
 
-            curve[t - 1] = leader_score
-
-        rec.add(fitness_obj, leader_pos, curve, t0)
-
-    print("WOA finished", flush=True)
-    return rec.result()
+    return leader_pos, curve, fitness.copy()
