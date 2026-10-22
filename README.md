@@ -30,7 +30,7 @@ python main.py --algos GWO,WOA,GQBWSSA --runs 5 --seed 46
 与 `Fitness_RF.m` 一致：
 
 ```
-fit = 0.99 × (1 − ACC) + 0.01 × 所选特征数 / (dim + 1)
+fit = 0.99 × (1 − ACC) + 0.01 × 特征选择率
 ```
 
 
