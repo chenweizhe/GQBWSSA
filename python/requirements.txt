@@ -1,0 +1,7 @@
+# 没有 cuML 时自动退回 CuPy 自写随机森林（gqbwssa/rf_gpu.py）。
+cupy
+numpy
+pandas
+matplotlib
+openpyxl
+scikit-learn
